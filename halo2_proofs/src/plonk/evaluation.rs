@@ -258,9 +258,9 @@ pub struct Evaluator<C: CurveAffine> {
     /// Lookup results
     pub lookup_results: Vec<Calculation>,
     // /// GPU
-    // pub gpu_gates_expr: Vec<ProveExpression<C::ScalarExt>>,
-    // pub gpu_lookup_expr: Vec<LookupProveExpression<C::ScalarExt>>,
-    // pub unit_ref_count: Vec<(usize, u32)>,
+    pub gpu_gates_expr: Vec<ProveExpression<C::ScalarExt>>,
+    pub gpu_lookup_expr: Vec<LookupProveExpression<C::ScalarExt>>,
+    pub unit_ref_count: Vec<(usize, u32)>,
 }
 
 /// CaluclationInfo
@@ -291,26 +291,26 @@ impl<C: CurveAffine> Evaluator<C> {
             }
         }
 
-        // let e_exprs = e.flatten().into_iter().collect::<Vec<_>>();
-        //
-        // let n_gpu = *crate::plonk::N_GPU;
-        // println!("gpus number is {}", n_gpu);
-        // let es = e_exprs
-        //     .chunks((e_exprs.len() + n_gpu - 1) / n_gpu)
-        //     .map(|e| ProveExpression::reconstruct(e))
-        //     .collect::<Vec<_>>();
-        //
-        // for (i, e) in es.iter().enumerate() {
-        //     let complexity = e.get_complexity();
-        //     ev.unit_ref_count = complexity.ref_cnt.into_iter().collect();
-        //     ev.unit_ref_count.sort_by(|(_, l), (_, r)| u32::cmp(l, r));
-        //     ev.unit_ref_count.reverse();
-        //
-        //     println!("--------- expr part {} ---------", i);
-        //     println!("complexity is {:?}", e.get_complexity());
-        //     println!("sorted ref cnt is {:?}", ev.unit_ref_count);
-        //     println!("r deep is {}", e.get_r_deep());
-        // }
+        let e_exprs = e.flatten().into_iter().collect::<Vec<_>>();
+
+        let n_gpu = *crate::plonk::N_GPU;
+        println!("gpus number is {}", n_gpu);
+        let es = e_exprs
+            .chunks((e_exprs.len() + n_gpu - 1) / n_gpu)
+            .map(|e| ProveExpression::reconstruct(e))
+            .collect::<Vec<_>>();
+
+        for (i, e) in es.iter().enumerate() {
+            let complexity = e.get_complexity();
+            ev.unit_ref_count = complexity.ref_cnt.into_iter().collect();
+            ev.unit_ref_count.sort_by(|(_, l), (_, r)| u32::cmp(l, r));
+            ev.unit_ref_count.reverse();
+
+            println!("--------- expr part {} ---------", i);
+            println!("complexity is {:?}", e.get_complexity());
+            println!("sorted ref cnt is {:?}", ev.unit_ref_count);
+            println!("r deep is {}", e.get_r_deep());
+        }
 
         // Lookups
         for lookup in cs.lookups.iter() {
@@ -336,31 +336,31 @@ impl<C: CurveAffine> Evaluator<C> {
         }
 
         // // Lookups in GPU
-        // for lookup in cs.lookups.iter() {
-        //     let evaluate_lc = |expressions: &Vec<Expression<_>>| {
-        //         let parts = expressions
-        //             .iter()
-        //             .map(|expr| LookupProveExpression::Expression(ProveExpression::from_expr(expr)))
-        //             .collect::<Vec<_>>();
-        //         let mut lc = parts[0].clone();
-        //         for part in parts.into_iter().skip(1) {
-        //             lc = LookupProveExpression::LcTheta(Box::new(lc), Box::new(part));
-        //         }
-        //         lc
-        //     };
-        //     // Input coset
-        //     let compressed_input_coset = evaluate_lc(&lookup.input_expressions);
-        //     // table coset
-        //     let compressed_table_coset = evaluate_lc(&lookup.table_expressions);
-        //     // z(\omega X) (a'(X) + \beta) (s'(X) + \gamma)
-        //     let right_gamma = LookupProveExpression::AddGamma(Box::new(compressed_table_coset));
-        //     ev.gpu_lookup_expr.push(LookupProveExpression::LcBeta(
-        //         Box::new(compressed_input_coset),
-        //         Box::new(right_gamma),
-        //     ));
-        // }
-        //
-        // ev.gpu_gates_expr = es;
+        for lookup in cs.lookups.iter() {
+            let evaluate_lc = |expressions: &Vec<Expression<_>>| {
+                let parts = expressions
+                    .iter()
+                    .map(|expr| LookupProveExpression::Expression(ProveExpression::from_expr(expr)))
+                    .collect::<Vec<_>>();
+                let mut lc = parts[0].clone();
+                for part in parts.into_iter().skip(1) {
+                    lc = LookupProveExpression::LcTheta(Box::new(lc), Box::new(part));
+                }
+                lc
+            };
+            // Input coset
+            let compressed_input_coset = evaluate_lc(&lookup.input_expressions);
+            // table coset
+            let compressed_table_coset = evaluate_lc(&lookup.table_expressions);
+            // z(\omega X) (a'(X) + \beta) (s'(X) + \gamma)
+            let right_gamma = LookupProveExpression::AddGamma(Box::new(compressed_table_coset));
+            ev.gpu_lookup_expr.push(LookupProveExpression::LcBeta(
+                Box::new(compressed_input_coset),
+                Box::new(right_gamma),
+            ));
+        }
+
+        ev.gpu_gates_expr = es;
         ev
     }
 
@@ -789,6 +789,8 @@ impl<C: CurveAffine> Evaluator<C> {
         lookups: &[Vec<lookup::prover::Committed<C>>],
         permutations: &[permutation::prover::Committed<C>],
     ) -> Polynomial<C::ScalarExt, ExtendedLagrangeCoeff> {
+        use crate::arithmetic::acquire_gpu;
+        use crate::arithmetic::release_gpu;
         use ec_gpu_gen::{fft::FftKernel, rust_gpu_tools::Device, rust_gpu_tools::LocalBuffer};
         use ff::PrimeField;
         use group::ff::Field;
@@ -801,8 +803,6 @@ impl<C: CurveAffine> Evaluator<C> {
             slice::ParallelSlice,
         };
         use std::{collections::LinkedList, marker::PhantomData};
-        use crate::arithmetic::acquire_gpu;
-        use crate::arithmetic::release_gpu;
 
         use crate::plonk::evaluation_gpu::{do_extended_fft, gen_do_extended_fft};
 
@@ -814,10 +814,10 @@ impl<C: CurveAffine> Evaluator<C> {
             .gpu_gates_expr
             .par_iter()
             .map(|x| {
-                 let gpu_idx = acquire_gpu();
-                 let r = x.eval_gpu(gpu_idx, pk, &advice_poly[0], &instance_poly[0], y);
-                 release_gpu(gpu_idx);
-                 r
+                let gpu_idx = acquire_gpu();
+                let r = x.eval_gpu(gpu_idx, pk, &advice_poly[0], &instance_poly[0], y);
+                release_gpu(gpu_idx);
+                r
             })
             .collect::<Vec<_>>()
             .into_iter()

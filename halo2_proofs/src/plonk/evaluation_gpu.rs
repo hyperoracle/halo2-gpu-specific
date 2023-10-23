@@ -450,8 +450,6 @@ impl<F: FieldExt> ProveExpression<F> {
         let mut values = pk.vk.domain.empty_extended();
         let devices = Device::all();
 
-
-
         let device = devices[gpu_idx % devices.len()];
         let programs = vec![ec_gpu_gen::program!(device).unwrap()];
         let kern =
@@ -1304,6 +1302,7 @@ impl<F: FieldExt> ProveExpression<F> {
         res
     }
 
+    /*
     // u32 is order of y
     pub(crate) fn flatten(self) -> BTreeMap<Vec<ProveExpressionUnit>, BTreeMap<u32, F>> {
         match self {
@@ -1350,5 +1349,87 @@ impl<F: FieldExt> ProveExpression<F> {
             ProveExpression::Y(ys) => BTreeMap::from_iter(vec![(vec![], ys)].into_iter()),
             ProveExpression::Scale(_, _) => unreachable!(),
         }
+    }*/
+
+    // Transform recursive to iter
+    pub(crate) fn flatten(self) -> BTreeMap<Vec<ProveExpressionUnit>, BTreeMap<u32, F>> {
+        let mut stack = Vec::new();
+        stack.push(FlattenState::Start(self));
+        let mut result = BTreeMap::new();
+
+        while let Some(state) = stack.pop() {
+            match state {
+                FlattenState::Start(expr) => match expr {
+                    ProveExpression::Unit(u) => {
+                        result = BTreeMap::from_iter(
+                            vec![(
+                                vec![u],
+                                BTreeMap::from_iter(vec![(0, F::one())].into_iter()),
+                            )]
+                            .into_iter(),
+                        );
+                    }
+                    ProveExpression::Op(l, r, Bop::Sum) => {
+                        stack.push(FlattenState::SumLeft(r));
+                        stack.push(FlattenState::Start(*l));
+                    }
+                    ProveExpression::Op(l, r, Bop::Product) => {
+                        stack.push(FlattenState::ProductLeft(r));
+                        stack.push(FlattenState::Start(*l));
+                    }
+                    ProveExpression::Y(ys) => {
+                        result = BTreeMap::from_iter(vec![(vec![], ys)].into_iter());
+                    }
+                    ProveExpression::Scale(_, _) => unreachable!(),
+                },
+                FlattenState::SumLeft(right_expr) => {
+                    let left_result = result.clone();
+                    stack.push(FlattenState::SumRight(left_result));
+                    stack.push(FlattenState::Start(*right_expr));
+                }
+                FlattenState::SumRight(mut left_result) => {
+                    for (rk, rys) in result.into_iter() {
+                        if let Some(lys) = left_result.get_mut(&rk) {
+                            Self::ys_add_assign(lys, rys);
+                        } else {
+                            left_result.insert(rk, rys);
+                        }
+                    }
+                    result = left_result;
+                }
+                FlattenState::ProductLeft(right_expr) => {
+                    let left_result = result.clone();
+                    stack.push(FlattenState::ProductRight(left_result));
+                    stack.push(FlattenState::Start(*right_expr));
+                }
+                FlattenState::ProductRight(left_result) => {
+                    let mut new_result = BTreeMap::new();
+
+                    for (lk, lys) in left_result.into_iter() {
+                        for (rk, rys) in result.clone().into_iter() {
+                            let mut k = vec![lk.clone(), rk.clone()].concat();
+                            k.sort();
+                            let ys = Self::ys_mul(&lys, &rys);
+                            if let Some(origin_ys) = new_result.get_mut(&k) {
+                                Self::ys_add_assign(origin_ys, ys);
+                            } else {
+                                new_result.insert(k, ys);
+                            }
+                        }
+                    }
+
+                    result = new_result;
+                }
+            }
+        }
+
+        result
     }
+}
+enum FlattenState<F> {
+    Start(ProveExpression<F>),
+    SumLeft(Box<ProveExpression<F>>),
+    SumRight(BTreeMap<Vec<ProveExpressionUnit>, BTreeMap<u32, F>>),
+    ProductLeft(Box<ProveExpression<F>>),
+    ProductRight(BTreeMap<Vec<ProveExpressionUnit>, BTreeMap<u32, F>>),
 }
